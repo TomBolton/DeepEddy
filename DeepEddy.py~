@@ -1,0 +1,361 @@
+"""
+
+Tom Bolton
+tom.bolton@physics.ox.ac.uk
+Atmospheric, Oceanic, and Planetary Physics, University of Oxford
+23/09/2018
+
+This script contains various functions for the preparation,
+training, and testing of the convolutional neural networks (CNN)
+used in the paper "Applications of Deep Learning to Ocean Data 
+Inference and Sub-Grid Parameterisation".
+
+The functions are split into the following made catergories:
+
+- Data preparation.
+- Training and predict.
+- Plotting/Misc.
+
+"""
+
+import time
+import pickle
+import numpy as np
+import scipy.io as sio
+import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter
+
+from keras import backend as K
+from keras.models import load_model
+from keras.models import Model
+from keras.layers import Input, Convolution2D, Dense, Flatten, MaxPooling2D, Lambda
+from keras.optimizers import Adam
+
+
+########################################################################
+#
+# Data Preparation Functions
+#
+########################################################################
+
+def calcEddyForcing( psiEddy, psiBar, l ) :
+    """
+
+    Given the filtered-streamfunction 'psiBar' and the sub-filter
+    streamfunction psiEddy = psi - psiBar, calculate the components
+    of the sub-filter eddy momentum forcing Sx and Sy
+
+    (Sx,Sy) = (U.grad)U - filter( (u.grad)u ),
+
+    where U is the velocity from the filtered-streamfunction, and
+    u is the full velocity (filtered + sub-filter).    The calculation
+    requires more spatial-filtering, which is why the length-scale
+    of the filter 'l' (in km) is required as an input variable.
+
+    """
+
+    # spatial-resolution of QG model (7.5km)
+    dx = 7.5e3 
+
+    
+    # streamfunction for calculating u and v
+    psi = psiBar + psiEddy
+
+    # calculate gradients
+    [ psi_t, psi_y, psi_x] = np.gradient( psi, dx )
+    [ psiBar_t, psiBar_y, psiBar_x] = np.gradient( psiBar, dx )
+
+    u, v = -psi_y, psi_x
+    U, V = -psiBar_y, psiBar_x
+    
+    # Calcluate filtered-advection term
+    [ U_t, U_y, U_x ] = np.gradient( U, dx );  del U_t
+    [ V_t, V_y, V_x ] = np.gradient( V, dx );  del V_t
+
+    # ( Ud/dx + Vd/dy )U and ( Ud/dx + Vd/dy )V
+    adv1_x = U * U_x + V * U_y
+    adv1_y = U * V_x + V * V_y
+
+    del U_x, U_y, V_x, V_y
+
+    # Calculate sub-filter advection term
+    [u_t, u_y, u_x] = np.gradient(u, dx); del u_t
+    [v_t, v_y, v_x] = np.gradient(v, dx); del v_t
+
+    # ( ud/dx + vd/dy )u + ( ud/dx + vd/dy )v
+    adv2_x = u * u_x + v * u_y
+    adv2_y = u * v_x + v * v_y
+
+    del u_x, u_y, v_x, v_y
+
+    for t in range( adv2_x.shape[0] ) :
+        adv2_x[t,:,:] = gaussian_filter( adv2_x[t,:,:], (l*1e3)/dx )
+        adv2_y[t,:,:] = gaussian_filter( adv2_y[t,:,:], (l*1e3)/dx )
+
+    # Calculate the eddy momentum forcing components
+    Sx = adv1_x - adv2_x
+    Sy = adv1_y - adv2_y
+
+    return Sx, Sy
+
+def loadAndNormDataS( l, axis, region, MOMENTUM_B=False ):
+    """
+
+    This function loads the filtered-streamfunction and
+    streamfunction anomaly from a .mat file, and calculates
+    the corresponding sub-filter eddy momentum forcing. Both the eddy
+    momentum    forcing and the filtered-streamfunctions are normalised
+    to zero    mean and unit variance, and split into training and test data.
+
+    l = spatial-scale (in km) of low-pass Gaussian filter
+    axis = 'x' or 'y',  specifying if Sx or Sy is calculated
+    region = 1, 2, or 3, the training regions being considered
+
+    For example, for l=30km, axis='y', and region=2, then this function
+    will form training and test datasets for the filtered-streamfunction
+    (input) and the meridional eddy momentum forcing Sy (output), using
+    data only from region=2, which corresponds to the eastern boundary.
+
+    """
+
+    # construct file and variable names
+    fileName = 'data/Training/psiTrain' + str(region) + '_' + str(l) + 'km.mat'
+    varName1 = 'psi' + str(region) + 'Anom'                 # sub-filter streamfunction
+    varName2 = 'psi' + str(region) + '_' + str(l) + 'km'    # filtered streamfunction
+
+    # load data
+    data = sio.loadmat( fileName )
+
+    # extract the filtered \bar(psi) and sub-filter psi' for this region
+    psiAnom = data[ varName1 ]
+    psiFilt = data[ varName2 ]
+
+    # move time dimension to the left
+    psiAnom = np.moveaxis( psiAnom, 2, 0 )
+    psiFilt = np.moveaxis( psiFilt, 2, 0 )
+
+    # calculate eddy (sub-filter) momentum forcing
+    Sx, Sy = calcEddyForcing( psiAnom, psiFilt, l )
+
+    # choose x or y axis depending on 'axis' variable
+    # Sx = zonal eddy momentum forcing
+    # Sy = meridional eddy momentum forcing
+    S = Sx if axis == 'x' else Sy
+
+    # standarize the variables to zero mean and unit variance,
+    # this is important in particular for neural networks
+    mu1, sigma1 = np.mean( psiFilt ), np.std( psiFilt )
+    mu2, sigma2 = np.mean( S ), np.std( S )
+
+    psiFilt = (psiFilt - mu1) / sigma1
+    S = (S - mu2) / sigma2
+
+    scalings = [mu1, sigma1, mu2, sigma2]
+
+    # split into training and test data (9 years for training, 
+    # 1 year for testing)
+    xTrain, xTest = psiFilt[:3300, :, :], psiFilt[3300:, :, :]
+    yTrain, yTest = S[:3300, :, :], S[3300:, :, :]
+
+    # split the original 160x160 region into 16 sub-regions
+    # of size 40x40. Then combine into a single data set (which
+    # will have sixteen times as many training samples).
+    xTrain = np.reshape(np.array(np.split(np.array(np.split(xTrain, 4, axis=2)), 4, axis=2)), (4 * 4 * 3300, 40, 40))
+    yTrain = np.reshape(np.array(np.split(np.array(np.split(yTrain, 4, axis=2)), 4, axis=2)), (4 * 4 * 3300, 40, 40))
+
+    xTest = np.reshape(np.array(np.split(np.array(np.split(xTest, 4, axis=2)), 4, axis=2)), (4 * 4 * 350, 40, 40))
+    yTest = np.reshape(np.array(np.split(np.array(np.split(yTest, 4, axis=2)), 4, axis=2)), (4 * 4 * 350, 40, 40))
+
+    if MOMENTUM_B :
+        # remove the spatial-mean of S, at each time-slice, in order to make
+        # the net input of momentum zero in the training data (approach B to
+        # conserving momentum by pre-processing training data).
+        yTrain = yTrain - np.mean( yTrain, axis=(1,2), keepdims=True )
+        yTest = yTest - np.mean( yTest, axis=(1,2), keepdims=True )
+
+    # add singleton dimension for input variables (this is for Keras)
+    xTrain = np.reshape(xTrain, (-1, 40, 40, 1))
+    xTest = np.reshape(xTest, (-1, 40, 40, 1))
+
+    # reshape outputs from 2D (40x40) to 1D vector 1600
+    yTrain = np.reshape(yTrain, (-1, 40 * 40))
+    yTest = np.reshape(yTest, (-1, 40 * 40)) 
+
+    return xTrain, yTrain, xTest, yTest, scalings
+
+
+
+########################################################################
+#
+# Training and Predicting Functions
+#
+########################################################################
+
+def trainCNN( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False ) :
+    
+    """
+    
+    This function loads data from a particular region of the QG model, 
+    and then trains a convolutional neural network (CNN) to predict
+    either the zonal (Sx) or meridional (Sy) component of the eddy momentum
+    forcing. The CNN is trained for 200 epochs, from which the model is
+    saved, including the validation loss during training as a function
+    of the number of epochs.
+    
+    """
+    
+    # load data 
+    xTrain, yTrain, xTest, yTest, scalings = loadAndNormDataS( l, axis, region, MOMENTUM_B )
+
+    # number of training and validation samples
+    nTrain = xTrain.shape[0]
+    nTest = xTest.shape[0]
+
+    print "Number of training samples: ", nTrain
+    print "Number of validation samples: ", nTest
+
+    ########## Construct Layers ##########
+
+    input_layer = Input( shape=( 40, 40, 1 ) )
+
+    # Convolution layers
+    conv_1 = Convolution2D( 16, (8,8), strides=(2,2), padding='valid', activation='selu')( input_layer )
+    conv_2 = Convolution2D( 8, (4,4), padding='valid', activation='selu')( conv_1 )
+    conv_3 = Convolution2D( 8, (4,4), padding='valid', activation='selu')( conv_2 )
+
+    # Max Pooling
+    pool_1 = MaxPooling2D( pool_size=(2,2) )( conv_3 )
+    flat = Flatten()(pool_1)
+
+    if MOMENTUM_A :
+        # dense (fully-connected) layer
+        dense_1 = Dense( units=40*40, activation='linear' )( flat )
+        
+        # Lambda layer to remove spatial-mean from time-slice. This is
+        # approach A to conserving momentum, i.e., altered-architecture.
+        output_layer = Lambda( lambda x: x - K.mean( x, axis=1, keepdims=True ) )( dense_1 )
+    else :
+        # dense (fully-connected) layer
+        output_layer = Dense( units=40*40, activation='linear' )( flat )
+        
+    ########## Train CNN ###########
+
+    myModel = Model( inputs=input_layer, outputs=output_layer )
+    myOpt = Adam( lr=0.001 )
+    myModel.compile( loss='mean_squared_error', optimizer=myOpt )
+
+    # show the architecture and the parameters
+    print myModel.summary()
+
+    # train the model
+    History = myModel.fit( xTrain, yTrain, batch_size=16, epochs=200, verbose=2, validation_data=( xTest, yTest )  )
+
+    # make file name
+    fileName = 'cnn30km_'+str(region)+'_S'+axis+'_200e'
+    if MOMENTUM_A : 
+        fileName = fileName + '_MOM_A'
+    elif MOMENTUM_B :    
+        fileName = fileName + '_MOM_B'
+
+    # save model
+    myModel.save( fileName + '.h5' )
+
+    # save training loss history
+    with open('history_' + fileName, 'wb') as file_pi :
+        pickle.dump( History.history, file_pi )
+
+
+def makeOverlapPreds( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False, MOMENTUM_C=False ) :
+    
+    """
+    
+    This function loads a trained neural network and makes predictions 
+    for the final year of validation data, overthe full region. 
+
+    As each neural network makes predictions for a 40x40 grid point area,
+    multiple overlapping predictions have to be made over the full 
+    domain (512x512) and then averaged at each grid point.
+    
+    region = 1, 2, or 3, the region on which the models are trained 
+    l = length-scale (in km) of the spatial-filtering
+    model = the CNN trained to predict Sx or Sy
+    
+    The predictions (and truth) and then saved in zipped numpy files.
+    
+    """
+    modelName = 'cnn30km_'+str(region)+'_S'+axis+'_200e'
+    if MOMENTUM_A :
+        modelName = modelName + 'MOM_A'
+    elif MOMENTUM_B :
+        modelName = modelName + 'MOM_B'
+
+    model = load_model('models/'+modelName+'.h5')
+    
+    # get scalings for psi, and either Sx or Sy
+    _, _, _, _, scalings = loadAndNormDataS(l, axis, region )
+
+    muPsi, sigmaPsi, muS, sigmaS = scalings[0], scalings[1], scalings[2], scalings[3]
+
+    # load filtered-streamfunction from full region (final year) to 
+    # use as the input variable to make preditions with
+    data = sio.loadmat('data/Validation/psiPred_30km.mat')
+
+    # extract filtered streamfunction and anomaly
+    psiAnom = data['psiPredAnom']
+    psiFilt = data['psiPred_30km']
+
+    # move time dimension to the left
+    psiAnom = np.moveaxis(psiAnom, 2, 0)
+    psiFilt = np.moveaxis(psiFilt, 2, 0)
+
+    # calculate the TRUE eddy source term
+    SxTrue, SyTrue = calcEddyForcing(psiAnom, psiFilt, l)
+
+    # standarize the input variables, i.e. the smoothed streamfunction,
+    # by removing the mean and dividing by the standard deviation
+    psiFilt = (psiFilt - muPsi) / sigmaPsi
+
+    # We now want to make the predictions for the entire region, at every
+    # time step. We move the neural network one grid point at a time over
+    # the entire region, making predictions as it moves along. The predictions
+    # at each grid point are then averaged.
+    SPred = np.zeros( (350,512,512) )
+
+    mask = np.zeros( (512,512) )
+
+    stride = 4
+
+    for i in range( 0, 512-40+1, stride):   # loop through points in x
+
+        print i  # progress update
+
+        t0 = time.time()
+
+        for j in range( 0, 512-40+1, stride ):   # loop through points in y
+
+            # make predictions at this point
+            SPred[:,j:j+40,i:i+40] += model.predict( np.reshape( psiFilt[:,j:j+40,i:i+40], (-1,40,40,1) ) ).reshape( (-1,40,40) )
+
+            # update number of predictions made at each grid point
+            mask[j:j+40,i:i+40] += 1
+
+        t1 = time.time()
+        print t1-t0
+
+    # average the predictions
+    SPred = np.divide( SxPred, mask )
+
+    # rescale psi, either Sx or Sy
+    psiFilt = psiFilt * sigmaPsi + muPsi
+    SPred = SPred * sigmaS + muS
+
+    # save as zipped numpy files
+    np.savez('S'+axis+'_Pred_R'+str(region)+'_str4.npz', SP=SPred )   # predictions
+    np.savez('SxSy_True_str4.npz', SxT=SxTrue, SyT=SyTrue )      # truth
+
+
+########################################################################
+#
+# Plotting and Misc Functions
+#
+########################################################################
