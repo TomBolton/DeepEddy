@@ -57,9 +57,9 @@ C = [ 'black', 'red', 'blue', 'gray' ]
 
 # Sx
 ax0.plot( t, np.squeeze( SxTrue[:,y0,x0] )*1e6, label='Truth', color=C[0], linewidth=2.5, ls='--' )
-ax0.plot( t, np.squeeze( SxPred1[:,y0,x0] )*1e6, label='CNN$_x$1', color=C[1], linewidth=1.5 )
-ax0.plot( t, np.squeeze( SxPred2[:,y0,x0] )*1e6, label='CNN$_x$2', color=C[2], linewidth=1.5 )
-ax0.plot( t, np.squeeze( SxPred3[:,y0,x0] )*1e6, label='CNN$_x$3', color=C[3], linewidth=1.5)
+ax0.plot( t, np.squeeze( SxPred1[:,y0,x0] )*1e6, label='$f_x(\overline{\psi},\mathbf{w}_1)$', color=C[1], linewidth=1.5 )
+ax0.plot( t, np.squeeze( SxPred2[:,y0,x0] )*1e6, label='$f_x(\overline{\psi},\mathbf{w}_2)$', color=C[2], linewidth=1.5 )
+ax0.plot( t, np.squeeze( SxPred3[:,y0,x0] )*1e6, label='$f_x(\overline{\psi},\mathbf{w}_3)$', color=C[3], linewidth=1.5)
 
 ax0.xaxis.grid( color=gridColor, lw=1 )
 ax0.set_title(r'$S_x$ and $\tilde{S}_x$ Time-Series (at $x=1920$km, $y=2400$km)', fontsize=12 )
@@ -72,9 +72,9 @@ ax0.text(3,1.32,'a.',fontsize=12)
 
 # Sy
 ax1.plot( t, np.squeeze( SyTrue[:,y0,x0] )*1e6, label='Truth', color=C[0], linewidth=2.5, ls='--' )
-ax1.plot( t, np.squeeze( SyPred1[:,y0,x0] )*1e6, label='CNN$_y$1', color=C[1], linewidth=1.5 )
-ax1.plot( t, np.squeeze( SyPred2[:,y0,x0] )*1e6, label='CNN$_y$2', color=C[2], linewidth=1.5 )
-ax1.plot( t, np.squeeze( SyPred3[:,y0,x0] )*1e6, label='CNN$_y$3', color=C[3], linewidth=1.5 )
+ax1.plot( t, np.squeeze( SyPred1[:,y0,x0] )*1e6, label='$f_y(\overline{\psi},\mathbf{w}_1)$', color=C[1], linewidth=1.5 )
+ax1.plot( t, np.squeeze( SyPred2[:,y0,x0] )*1e6, label='$f_y(\overline{\psi},\mathbf{w}_2)$', color=C[2], linewidth=1.5 )
+ax1.plot( t, np.squeeze( SyPred3[:,y0,x0] )*1e6, label='$f_y(\overline{\psi},\mathbf{w}_3)$', color=C[3], linewidth=1.5 )
 
 ax1.xaxis.grid( color=gridColor, lw=1 )
 ax1.set_title(r'$S_y$ and $\tilde{S}_y$ Time-Series (at $x=1920$km, $y=2400$km)', fontsize=12 )

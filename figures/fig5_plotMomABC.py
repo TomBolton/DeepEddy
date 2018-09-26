@@ -83,7 +83,7 @@ ax345.set_xticklabels( [] )
 ax345.xaxis.set_label_coords(0.5, -0.07)
 ax345.set_ylabel(r'Spatial-Mean $S_x$ or $\tilde{S}_x$ (10$^{-6}$ms$^{-2}$)', fontsize=9 )
 ax345.legend( shadow=True, loc=1, bbox_to_anchor=(1.2,1), facecolor=bgColor, fontsize=8  )
-ax345.text( 6, 0.0035, 'd.', fontsize=12 )
+ax345.text( 6, 0.025, 'd.', fontsize=12 )
 
 
 # V Momentum input
@@ -102,7 +102,7 @@ ax91011.xaxis.set_label_coords(0.5, -0.07)
 ax91011.set_xlabel('Day')
 ax91011.set_ylabel(r'Spatial-Mean $S_y$ or $\tilde{S}_y$ (10$^{-6}$ms$^{-2}$)', fontsize=9 )
 ax91011.legend( shadow=True, loc=1, bbox_to_anchor=(1.205,1), facecolor=bgColor, fontsize=8  )
-ax91011.text( 6, 0.014, 'h.', fontsize=12 )
+ax91011.text( 6, 0.025, 'h.', fontsize=12 )
 
 ##### STANDARD DEVIATIONS OF MOMENTUM-CONSERVING APPROACHES #####
 
