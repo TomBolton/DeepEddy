@@ -181,16 +181,80 @@ def loadAndNormDataS( l, axis, region, MOMENTUM_B=False ):
     yTest = np.reshape(yTest, (-1, 40 * 40)) 
 
     return xTrain, yTrain, xTest, yTest, scalings
+    
+def loadAndNormDataMidPsi() :
+
+    """
+
+    This function loads upper- and middle- layer streamfunctions.
+    The upper-layer streamfunction is spatially filtered as before
+    with a Gaussian low-pass filter of width 30km. 
+    
+    Data from region 1 is used, and the upper-layer streamfunction
+    is the input variable, while the middle-layer (sub-surface) 
+    streamfunction is the output variable to be predicted by the 
+    convolutional neural network.
+
+    """
+
+    fileName = '../data/Training/psiTrain1_30km_mid.mat'
+
+    varName1 = 'psi1_top_30km'
+    varName2 = 'psi1_mid'
+
+    # load data
+    data = sio.loadmat( fileName )
+
+    # extract high resolution and interpolated streamfunctions
+    psiTop = data[ varName1 ]
+    psiMid = data[ varName2 ]
+
+    # move time dimension to the left
+    psiTop = np.moveaxis( psiTop, 2, 0 )
+    psiMid = np.moveaxis( psiMid, 2, 0 )
+
+    # standarize the input variables, i.e. the smoothed streamfunction,
+    # by removing the mean and dividing by the standard deviation
+    muTop, sigmaTop = np.mean( psiTop ), np.std( psiTop )
+    muMid, sigmaMid = np.mean( psiMid ), np.std( psiMid )
+
+    psiTop = ( psiTop - muTop ) / sigmaTop
+    psiMid = ( psiMid - muMid ) / sigmaMid
+
+    scalings = [ muTop, sigmaTop, muMid, sigmaMid ]
+
+    # split into training and test data
+    xTrain, xTest = psiTop[:3300, :, :], psiTop[3300:, :, :]
+    yTrain, yTest = psiMid[:3300, :, :], psiMid[3300:, :, :]
+
+    # split the original 160x160 region into 16 sub-regions
+    # of size 40x40. Then combine into a single data set (which
+    # will have sixteen times as many training samples).
+    xTrain = np.reshape( np.array( np.split( np.array( np.split( xTrain, 4, axis=2) ), 4, axis=2) ), (4 * 4 * 3300, 40, 40) )
+    yTrain = np.reshape( np.array( np.split( np.array( np.split( yTrain, 4, axis=2) ), 4, axis=2) ), (4 * 4 * 3300, 40, 40) )
+
+    xTest = np.reshape( np.array( np.split( np.array( np.split(xTest, 4, axis=2) ), 4, axis=2) ), (4 * 4 * 350, 40, 40) )
+    yTest = np.reshape( np.array( np.split( np.array( np.split( yTest, 4, axis=2) ), 4, axis=2) ), (4 * 4 * 350, 40, 40) )
+
+    # add singleton dimension for input variables (this is for Keras)
+    xTrain = np.reshape( xTrain, (-1, 40, 40, 1) )
+    xTest = np.reshape( xTest, (-1, 40, 40, 1) )
+
+    # reshape outputs from 2D (40x40) to 1D vector 1600
+    yTrain = np.reshape( yTrain, (-1, 40 * 40) )
+    yTest = np.reshape( yTest, (-1, 40 * 40) )
+
+    return xTrain, yTrain, xTest, yTest, scalings
 
 
 
 ########################################################################
 #
-# Training and Predicting Functions
+# Training Functions
 #
 ########################################################################
 
-def trainCNN( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False ) :
+def trainCNN_S( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False ) :
     
     """
     
@@ -262,6 +326,72 @@ def trainCNN( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False ) :
     # save training loss history
     with open('history_' + fileName, 'wb') as file_pi :
         pickle.dump( History.history, file_pi )
+        
+def trainCNN_SubSurface() :
+
+	""" 
+	
+	This function loads the upper- and middle-layer streamfunction
+	from region 1, and trains a convolutional neural network to
+	predict the middle-layer (output) using the upper-layer (input).
+	
+	The architecture of this neural network is identical to those
+	used to predict the eddy momentum forcing.
+	
+	"""
+	
+	xTrain, yTrain, xTest, yTest, scalings = loadAndNormDataMidPsi()
+
+	nTrain = xTrain.shape[0]
+	nTest = xTest.shape[0]
+
+	print nTrain, nTest
+
+	########## Construct Layers ##########
+
+	input_layer = Input( shape=( 40, 40, 1 ) )
+
+	# Convolution layers
+	conv_1 = Convolution2D( 16, (8,8), strides=(2,2), padding='valid', activation='selu')( input_layer )
+	conv_2 = Convolution2D( 8, (4,4), padding='valid', activation='selu')( conv_1 )
+	conv_3 = Convolution2D( 8, (4,4), padding='valid', activation='selu')( conv_2 )
+
+	# Max Pooling
+	pool_1 = MaxPooling2D( pool_size=(2,2) )( conv_3 )
+	flat = Flatten()(pool_1)
+
+	# Dense (fully-connected) layer
+	output_layer = Dense( units=40*40, activation='linear' )( flat )
+
+	########## Train CNN ###########
+
+	myModel = Model( inputs=input_layer, outputs=output_layer )
+	myOpt = Adam( lr=0.001 )
+	myModel.compile( loss='mean_squared_error', optimizer=myOpt )
+
+	# uncomment if you want to load a model instead
+	#myModel = load_model('cnn30km_1_Sy_200e_MOM_b.h5')
+
+	# show the architecture and the parameters
+	print myModel.summary()
+
+	# train the model
+	History = myModel.fit( xTrain, yTrain, batch_size=16, epochs=100, verbose=2, validation_data=( xTest, yTest )  )
+
+	# save the model
+	myModel.save('cnn30km_1_midPsi_100e.h5')
+
+	# save training history
+	with open('history_cnn30km_1_midPsi_100e', 'wb') as file_pi :
+		pickle.dump( History.history, file_pi )
+        
+        
+        
+########################################################################
+#
+# Predicting Functions
+#
+########################################################################
 
 
 def makeOverlapPreds( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False, MOMENTUM_C=False ) :
@@ -492,121 +622,126 @@ def getActivations( X, model ) :
     
 def plotSyntheticActivationMaps() :
 	
-	"""
+    """
 	
-	This function examines the activation maps at each
-	stage of a trained convolutional neural network, by
-	generating a 'fake' streamfunction as the input.
+    This function examines the activation maps at each
+    stage of a trained convolutional neural network, by
+    generating a 'fake' streamfunction as the input.
 	
-	A radially symmetric Gaussian is used as the fake input
-	to represent an eddy. The resulting activations maps from
-	each convolution layer are then plotted.
+    A radially symmetric Gaussian is used as the fake input
+    to represent an eddy. The resulting activations maps from
+    each convolution layer are then plotted.
+	
+    The specific neural network loaded is the CNN trained on
+    region 1 to predict Sx.
 	
     """
 
-	# load model
-	myModelSx = load_model('models/cnn30km_1_Sx_200e.h5')
-	print myModelSx.summary()
+    # load model
+    myModelSx = load_model('models/cnn30km_1_Sx_200e.h5')
+    print myModelSx.summary()
 
-	# make 'fake' streamfunction
-	x, y = np.meshgrid(np.linspace(-20,20,40), np.linspace(-20,20,40))
-	d = np.sqrt(x*x+y*y)
-	sigma = 8.0
-	psi = np.exp(-( d**2 / ( 2.0 * sigma**2 ) ) )
+    # make 'fake' streamfunction
+    x, y = np.meshgrid(np.linspace(-20,20,40), np.linspace(-20,20,40))
+    d = np.sqrt(x*x+y*y)
+    sigma = 8.0
+    psi = np.exp(-( d**2 / ( 2.0 * sigma**2 ) ) )
 
-	##### Calculate activations ######
+    ##### Calculate activations ######
 
-	# make prediction of Sx
-	Sx = myModelSx.predict( psi.reshape( (1,40,40,1) ) ).reshape( (40,40) )
+    # make prediction of Sx
+    Sx = myModelSx.predict( psi.reshape( (1,40,40,1) ) ).reshape( (40,40) )
 
-	# calculate the activation layers for two regions
-	act1, act2, act3 = getActivations( psi, myModelSx )
+    # calculate the activation layers for two regions
+    act1, act2, act3 = getActivations( psi, myModelSx )
 
-	##### Create subplots #####
+    ##### Create subplots #####
 
-	# create subplot for input streamfunction
-	col0Axis = plt.subplot2grid( (8,16), (2,0), colspan=4, rowspan=4 )
-	col0Axis.axis('off')
+    # create subplot for input streamfunction
+    col0Axis = plt.subplot2grid( (8,16), (2,0), colspan=4, rowspan=4 )
+    col0Axis.axis('off')
 
-	# create subplots for each layer
-	col1Axes = []; col2Axes = []
-	col3Axes = []; col4Axes = []
+    # create subplots for each layer
+    col1Axes = []; col2Axes = []
+    col3Axes = []; col4Axes = []
 
-	for row in range(8) :
-		# create axes
-		ax1 = plt.subplot2grid( (8,16), (row,5) )  # 1st layer
-		ax2 = plt.subplot2grid( (8,16), (row,6) )  # 1st layer
-		ax3 = plt.subplot2grid( (8,16), (row,8) )  # 2nd layer
-		ax4 = plt.subplot2grid( (8,16), (row,10) )  # 3rd layer
+    for row in range(8) :
+    	# create axes
+    	ax1 = plt.subplot2grid( (8,16), (row,5) )  # 1st layer
+    	ax2 = plt.subplot2grid( (8,16), (row,6) )  # 1st layer
+    	ax3 = plt.subplot2grid( (8,16), (row,8) )  # 2nd layer
+    	ax4 = plt.subplot2grid( (8,16), (row,10) )  # 3rd layer
 
-		# add to lists
-		col1Axes.append( ax1 ); col2Axes.append( ax2 )
-		col3Axes.append( ax3 ); col4Axes.append( ax4 )
+    	# add to lists
+    	col1Axes.append( ax1 ); col2Axes.append( ax2 )
+     	col3Axes.append( ax3 ); col4Axes.append( ax4 )
 
 
-	# create subplot for Sx prediction
-	col5Axis = plt.subplot2grid( (8,16), (2,12), colspan=4, rowspan=4 )
-	col5Axis.axis('off')
+    # create subplot for Sx prediction
+    col5Axis = plt.subplot2grid( (8,16), (2,12), colspan=4, rowspan=4 )
+    col5Axis.axis('off')
 
-	# set size of figure
-	fig = plt.gcf()
-	fig.set_size_inches( (16,9) )
+    # set size of figure
+    fig = plt.gcf()
+    fig.set_size_inches( (16,9) )
 
-	##### Plot activations ######
+    ##### Plot activations ######
 
-	# plot input streamfunction
-	col0Axis.imshow( psi, cmap='seismic', origin='lower' )
-	col0Axis.set_title(r'Synthetically-Generated Input ($\overline{\psi}$)')
-	#col0Axis.text( 1, 36, 'a.', color='white', fontsize=15, fontweight='bold' )
+    # plot input streamfunction
+    col0Axis.imshow( psi, cmap='seismic', origin='lower' )
+    col0Axis.set_title(r'Synthetically-Generated Input ($\overline{\psi}$)')
+    #col0Axis.text( 1, 36, 'a.', color='white', fontsize=15, fontweight='bold' )
 
-	# plot activation functions of all three layers
-	for row in range(8) :
+    # plot activation functions of all three layers
+    for row in range(8) :
 
-		# turn of the axes of each subplot
-		col1Axes[row].axis('off'); col2Axes[row].axis('off')
-		col3Axes[row].axis('off'); col4Axes[row].axis('off')
+    	# turn of the axes of each subplot
+    	col1Axes[row].axis('off'); col2Axes[row].axis('off')
+    	col3Axes[row].axis('off'); col4Axes[row].axis('off')
 
-		# Activation Layer I
-		col1Axes[row].imshow( act1[:,:,row], cmap='seismic', origin='lower' )
-		col2Axes[row].imshow( act1[:,:,row+8], cmap='seismic', origin='lower' )
+        # Activation Layer I
+        col1Axes[row].imshow( act1[:,:,row], cmap='seismic', origin='lower' )
+        col2Axes[row].imshow( act1[:,:,row+8], cmap='seismic', origin='lower' )
 
-		# Activation Layer II
-		col3Axes[row].imshow( act2[:,:,row], cmap='seismic', origin='lower' )
+        # Activation Layer II
+        col3Axes[row].imshow( act2[:,:,row], cmap='seismic', origin='lower' )
 
-		# Activation Layer III
-		col4Axes[row].imshow( act3[:,:,row], cmap='seismic', origin='lower' )
+        # Activation Layer III
+        col4Axes[row].imshow( act3[:,:,row], cmap='seismic', origin='lower' )
 
-	# plot predicted Sx
-	col5Axis.imshow( Sx, cmap='seismic', origin='lower' )
-	col5Axis.set_title(r'Output ($\tilde{S}_x$)')
-	col5Axis.yaxis.tick_right()
-	#col5Axis.text( 1, 36, 'e.', color='black', fontsize=15, fontweight='bold' )
+    # plot predicted Sx
+    col5Axis.imshow( Sx, cmap='seismic', origin='lower' )
+    col5Axis.set_title(r'Output ($\tilde{S}_x$)')
+    col5Axis.yaxis.tick_right()
+    #col5Axis.text( 1, 36, 'e.', color='black', fontsize=15, fontweight='bold' )
 
-	# add horizontal arrows between each layer
-	plt.text( 0.32, 0.5, r'$\longrightarrow$', transform=fig.transFigure, fontsize=25 )
-	plt.text( 0.475, 0.5, r'$\rightarrow$', transform=fig.transFigure, fontsize=25 )
-	plt.text( 0.575, 0.5, r'$\rightarrow$', transform=fig.transFigure, fontsize=25 )
-	plt.text( 0.665, 0.5, r'$\longrightarrow$', transform=fig.transFigure, fontsize=25 )
+    # add horizontal arrows between each layer
+    plt.text( 0.32, 0.5, r'$\longrightarrow$', transform=fig.transFigure, fontsize=25 )
+    plt.text( 0.475, 0.5, r'$\rightarrow$', transform=fig.transFigure, fontsize=25 )
+    plt.text( 0.575, 0.5, r'$\rightarrow$', transform=fig.transFigure, fontsize=25 )
+    plt.text( 0.665, 0.5, r'$\longrightarrow$', transform=fig.transFigure, fontsize=25 )
 
-	# label each layer
-	posX1, posX2, posX3, posX4 = col1Axes[0].get_position(), col2Axes[0].get_position(), col3Axes[0].get_position(), col4Axes[0].get_position()
+    # label each layer
+    posX1, posX2, posX3, posX4 = col1Axes[0].get_position(), col2Axes[0].get_position(), col3Axes[0].get_position(), col4Axes[0].get_position()
 
-	plt.text( 0.5*( posX1.x0 + posX1.width + posX2.x0 ), 0.9, 'b.\nConvolution\nLayer 1', transform=fig.transFigure, fontweight='bold', fontsize=12, ha='center' )
-	plt.text( posX3.x0 + 0.5 * posX3.width, 0.9, 'c.\nConvolution\nLayer 2', transform=fig.transFigure, fontweight='bold', fontsize=12, ha='center' )
-	plt.text( posX4.x0 + 0.5 * posX4.width, 0.9, 'd.\nConvolution\nLayer 3', transform=fig.transFigure, fontweight='bold', fontsize=12, ha='center' )
+    plt.text( 0.5*( posX1.x0 + posX1.width + posX2.x0 ), 0.9, 'b.\nConvolution\nLayer 1', transform=fig.transFigure, fontweight='bold', fontsize=12, ha='center' )
+    plt.text( posX3.x0 + 0.5 * posX3.width, 0.9, 'c.\nConvolution\nLayer 2', transform=fig.transFigure, fontweight='bold', fontsize=12, ha='center' )
+    plt.text( posX4.x0 + 0.5 * posX4.width, 0.9, 'd.\nConvolution\nLayer 3', transform=fig.transFigure, fontweight='bold', fontsize=12, ha='center' )
 
-	# add number of filters to each layer
-	plt.text( 0.5*( posX1.x0 + posX1.width + posX2.x0 ), 0.065, '16 feature maps\n(16 filters)', transform=fig.transFigure, fontweight='bold', ha='center', fontsize=12 )
-	plt.text( posX3.x0 + 0.5 * posX3.width, 0.065, '8 feature maps\n(16x8 filters)', transform=fig.transFigure, fontweight='bold', ha='center', fontsize=12 )
-	plt.text( posX4.x0 + 0.5 * posX4.width, 0.065, '8 feature maps\n(8x8 filters)', transform=fig.transFigure, fontweight='bold', ha='center', fontsize=12 )
+    # add number of filters to each layer
+    plt.text( 0.5*( posX1.x0 + posX1.width + posX2.x0 ), 0.065, '16 feature maps\n(16 filters)', transform=fig.transFigure, fontweight='bold', ha='center', fontsize=12 )
+    plt.text( posX3.x0 + 0.5 * posX3.width, 0.065, '8 feature maps\n(16x8 filters)', transform=fig.transFigure, fontweight='bold', ha='center', fontsize=12 )
+    plt.text( posX4.x0 + 0.5 * posX4.width, 0.065, '8 feature maps\n(8x8 filters)', transform=fig.transFigure, fontweight='bold', ha='center', fontsize=12 )
 
-	# add equation above input
-	plt.text( 0.22, 0.78, 'a.\nInput: Gaussian\nstreamfunction', fontsize=15, transform=fig.transFigure, ha='center', fontweight='bold' )
-	plt.text( 0.22, 0.73, r'$\overline{\psi} = e^{-r^2/2\sigma^2}$', fontsize=20, transform=fig.transFigure, ha='center', fontweight='bold' )
-	plt.text( 0.22, 0.25, r'( $\sigma =$' + str(sigma*7.5) + 'km )', fontsize=15, transform=fig.transFigure, ha='center' )
+    # add equation above input
+    plt.text( 0.22, 0.78, 'a.\nInput: Gaussian\nstreamfunction', fontsize=15, transform=fig.transFigure, ha='center', fontweight='bold' )
+    plt.text( 0.22, 0.73, r'$\overline{\psi} = e^{-r^2/2\sigma^2}$', fontsize=20, transform=fig.transFigure, ha='center', fontweight='bold' )
+    plt.text( 0.22, 0.25, r'( $\sigma =$' + str(sigma*7.5) + 'km )', fontsize=15, transform=fig.transFigure, ha='center' )
 
-	# add text above output
-	posX5 = col5Axis.get_position()
-	plt.text( posX5.x0 + 0.5 * posX5.width, 0.75, 'e.\nOutput: Prediction from\ntrained neural network\nCNN$_x$1', fontsize=15, ha='center', transform=fig.transFigure, fontweight='bold' )
+    # add text above output
+    posX5 = col5Axis.get_position()
+    plt.text( posX5.x0 + 0.5 * posX5.width, 0.75, 'e.\nOutput: Prediction from\ntrained neural network\nCNN$_x$1', fontsize=15, ha='center', transform=fig.transFigure, fontweight='bold' )
 
-	plt.show()
+    plt.savefig('activationMaps.png', format='png', dpi=300 )
+
+    plt.show()
