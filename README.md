@@ -1,11 +1,15 @@
 # DeepEddy
 
+This repository contains the python code used for the paper titled: 
+
+**"Applications of Deep Learning to Ocean Data Inference and Sub-Grid 
+Parameterisation".** 
+
+***
+
 ![fig1](figures/intro.png)
 
-This repository contains the python code used for the paper titled 
-
-"Applications of Deep Learning to Ocean Data Inference and Sub-Grid 
-Parameterisation". 
+***
 
 Thomas Bolton, Laure Zanna
 
