@@ -1,6 +1,6 @@
 # DeepEddy
 
-![fig1](intro.png)
+![fig1](figures/intro.png)
 
 This repository contains the python code used for the paper titled 
 
@@ -24,5 +24,5 @@ In order to examine more clearly what each convolution layer is doing, we constr
 The interesting part are the activation maps of the first convolution layer. These activation maps resemble a collection of 1st and 2nd order derivatives. Therefore, without a priori knowledge, the neural network learns to take derivates of the input streamfunction, which physically correspond to velocities and velocity shears. This is a robust feature across all of the neural networks trained to predict the eddy momentum forcing.
 
 
-![fig2](activationMaps.png)
+![fig2](figures/activationMaps.png)
 
