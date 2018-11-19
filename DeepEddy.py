@@ -24,6 +24,10 @@ import numpy as np
 import scipy.io as sio
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
+from scipy.interpolate import griddata
+from itertools import combinations
+import random
+from sklearn.neighbors import KNeighborsRegressor
 
 from keras import backend as K
 from keras.models import load_model
@@ -88,8 +92,8 @@ def calcEddyForcing( psiEddy, psiBar, l ) :
     del u_x, u_y, v_x, v_y
 
     for t in range( adv2_x.shape[0] ) :
-        adv2_x[t,:,:] = gaussian_filter( adv2_x[t,:,:], (l*1e3)/dx )
-        adv2_y[t,:,:] = gaussian_filter( adv2_y[t,:,:], (l*1e3)/dx )
+       adv2_x[t,:,:] = gaussian_filter( adv2_x[t,:,:], (l*1e3)/dx )
+       adv2_y[t,:,:] = gaussian_filter( adv2_y[t,:,:], (l*1e3)/dx )
 
     # Calculate the eddy momentum forcing components
     Sx = adv1_x - adv2_x
@@ -119,7 +123,7 @@ def loadAndNormDataS( l, axis, region, MOMENTUM_B=False ):
 
     # construct file and variable names
     fileName = 'data/Training/psiTrain' + str(region) + '_' + str(l) + 'km.mat'
-    varName1 = 'psi' + str(region) + 'Anom'                 # sub-filter streamfunction
+    varName1 = 'psi' + str(region) + 'Anom'              # sub-filter streamfunction
     varName2 = 'psi' + str(region) + '_' + str(l) + 'km'    # filtered streamfunction
 
     # load data
@@ -166,11 +170,146 @@ def loadAndNormDataS( l, axis, region, MOMENTUM_B=False ):
     yTest = np.reshape(np.array(np.split(np.array(np.split(yTest, 4, axis=2)), 4, axis=2)), (4 * 4 * 350, 40, 40))
 
     if MOMENTUM_B :
-        # remove the spatial-mean of S, at each time-slice, in order to make
-        # the net input of momentum zero in the training data (approach B to
-        # conserving momentum by pre-processing training data).
-        yTrain = yTrain - np.mean( yTrain, axis=(1,2), keepdims=True )
-        yTest = yTest - np.mean( yTest, axis=(1,2), keepdims=True )
+       # remove the spatial-mean of S, at each time-slice, in order to make
+       # the net input of momentum zero in the training data (approach B to
+       # conserving momentum by pre-processing training data).
+       yTrain = yTrain - np.mean( yTrain, axis=(1,2), keepdims=True )
+       yTest = yTest - np.mean( yTest, axis=(1,2), keepdims=True )
+
+    # add singleton dimension for input variables (this is for Keras)
+    xTrain = np.reshape(xTrain, (-1, 40, 40, 1))
+    xTest = np.reshape(xTest, (-1, 40, 40, 1))
+
+    # reshape outputs from 2D (40x40) to 1D vector 1600
+    yTrain = np.reshape(yTrain, (-1, 40 * 40))
+    yTest = np.reshape(yTest, (-1, 40 * 40)) 
+
+    return xTrain, yTrain, xTest, yTest, scalings
+    
+def makeSparseDataset( l, axis, region, N ):
+    """
+
+    This function loads the filtered-streamfunction and
+    streamfunction anomaly from a .mat file, and calculates
+    the corresponding sub-filter eddy momentum forcing. Both the eddy
+    momentum    forcing and the filtered-streamfunctions are normalised
+    to zero    mean and unit variance, and split into training and test data.
+
+    However, instead using all points in space, this function randomly
+    samples N unique (x,y) pairs and interpolates the corresponding values
+    of Sx (or Sy) to the 40x40 input size. 
+
+    """
+
+    # construct file and variable names
+    fileName = 'data/Training/psiTrain' + str(region) + '_' + str(l) + 'km.mat'
+    varName1 = 'psi' + str(region) + 'Anom'              # sub-filter streamfunction
+    varName2 = 'psi' + str(region) + '_' + str(l) + 'km'    # filtered streamfunction
+
+    # load data
+    data = sio.loadmat( fileName )
+
+    # extract the filtered \bar(psi) and sub-filter psi' for this region
+    psiAnom = data[ varName1 ]
+    psiFilt = data[ varName2 ]
+
+    # move time dimension to the left
+    psiAnom = np.moveaxis( psiAnom, 2, 0 )
+    psiFilt = np.moveaxis( psiFilt, 2, 0 )
+
+    # calculate eddy (sub-filter) momentum forcing
+    Sx, Sy = calcEddyForcing( psiAnom, psiFilt, l )
+
+    # choose x or y axis depending on 'axis' variable
+    # Sx = zonal eddy momentum forcing
+    # Sy = meridional eddy momentum forcing
+    S = Sx if axis == 'x' else Sy
+
+    # standarize the variables to zero mean and unit variance,
+    # this is important in particular for neural networks
+    mu1, sigma1 = np.mean( psiFilt ), np.std( psiFilt )
+    mu2, sigma2 = np.mean( S ), np.std( S )
+
+    psiFilt = (psiFilt - mu1) / sigma1
+    S = (S - mu2) / sigma2
+
+    scalings = [mu1, sigma1, mu2, sigma2]
+
+    # split into training and test data (9 years for training, 
+    # 1 year for testing)
+    xTrain, xTest = psiFilt[:3300, :, :], psiFilt[3300:, :, :]
+    yTrain, yTest = S[:3300, :, :], S[3300:, :, :]
+    
+    # split the original 160x160 region into 16 sub-regions
+    # of size 40x40. Then combine into a single data set (which
+    # will have sixteen times as many training samples).
+    xTrain = np.reshape(np.array(np.split(np.array(np.split(xTrain, 4, axis=2)), 4, axis=2)), (4 * 4 * 3300, 40, 40))
+    yTrain = np.reshape(np.array(np.split(np.array(np.split(yTrain, 4, axis=2)), 4, axis=2)), (4 * 4 * 3300, 40, 40))
+
+    xTest = np.reshape(np.array(np.split(np.array(np.split(xTest, 4, axis=2)), 4, axis=2)), (4 * 4 * 350, 40, 40))
+    yTest = np.reshape(np.array(np.split(np.array(np.split(yTest, 4, axis=2)), 4, axis=2)), (4 * 4 * 350, 40, 40))
+    
+    # loop through each time-slice in the training data, sub-sample 
+    # N points in space, and then reconstruct the input and output 
+    # variables (psi and S) through a simple 2d interpolation
+    
+    print "Sub-sampling training data to ", N, " points out of 1600."
+    
+    for t in range(4*4*3300):
+       
+       xy, f_psi, f_S = [], [], []
+       
+       if t % 1000 == 0 : print t
+       
+       coords = generateUniqueCoords( N )
+       
+       for pair in coords :
+		   
+          xy.append( np.array( pair ) )  # x-y coordinates
+       
+          f_psi.append( np.squeeze( xTrain[ t, pair[1], pair[0] ] ) )
+          f_S.append( np.squeeze( yTrain[ t, pair[1], pair[0] ] ) )  
+		
+       # nearest neighbour interp       
+       grid_x, grid_y = np.mgrid[0:40:1, 0:40:1]
+
+       x_pred = grid_x.flatten()
+       y_pred = grid_y.flatten()
+
+       data = np.array( [ x_pred, y_pred ] ).T
+       
+       KNR_psi = KNeighborsRegressor( n_neighbors=1 )
+       KNR_S = KNeighborsRegressor( n_neighbors=1 )
+       
+       KNR_psi.fit( coords, f_psi )
+       KNR_S.fit( coords, f_S )
+       
+       x_near = np.transpose( np.reshape( KNR_psi.predict( data ), (40,40) ) )
+       y_near = np.transpose( np.reshape( KNR_psi.predict( data ), (40,40) ) )
+       
+       # cubic interp
+       x_cubic = np.transpose( griddata( xy, f_psi, (grid_x, grid_y), method='cubic') )
+       y_cubic = np.transpose( griddata( xy, f_S, (grid_x, grid_y), method='cubic') )
+       
+       # sanity check
+       #fig, axArr = plt.subplots(2,2)	
+       #axArr[0,0].imshow( np.squeeze( xTrain[t,:,:] ) )
+       #axArr[0,0].set_title( 'before' )
+       #axArr[0,1].imshow( x_near ) 
+       #axArr[0,1].set_title( 'nearest' )
+       #axArr[1,0].imshow( x_cubic ) 
+       #axArr[1,0].set_title( 'cubic' )
+       
+       # remove NaNs using nearest neigbour       
+       x_cubic[ np.isnan( x_cubic ) ] = x_near[ np.isnan( x_cubic ) ]
+       y_cubic[ np.isnan( y_cubic ) ] = y_near[ np.isnan( y_cubic ) ]
+		
+       xTrain[t,:,:] = x_cubic
+       yTrain[t,:,:] = y_cubic
+       
+       #axArr[1,1].imshow( x_cubic )
+       #axArr[1,1].set_title( 'after' )
+       #plt.show()
 
     # add singleton dimension for input variables (this is for Keras)
     xTrain = np.reshape(xTrain, (-1, 40, 40, 1))
@@ -291,16 +430,16 @@ def trainCNN_S( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False ) :
     flat = Flatten()(pool_1)
 
     if MOMENTUM_A :
-        # dense (fully-connected) layer
-        dense_1 = Dense( units=40*40, activation='linear' )( flat )
-        
-        # Lambda layer to remove spatial-mean from time-slice. This is
-        # approach A to conserving momentum, i.e., altered-architecture.
-        output_layer = Lambda( lambda x: x - K.mean( x, axis=1, keepdims=True ) )( dense_1 )
+       # dense (fully-connected) layer
+       dense_1 = Dense( units=40*40, activation='linear' )( flat )
+       
+       # Lambda layer to remove spatial-mean from time-slice. This is
+       # approach A to conserving momentum, i.e., altered-architecture.
+       output_layer = Lambda( lambda x: x - K.mean( x, axis=1, keepdims=True ) )( dense_1 )
     else :
-        # dense (fully-connected) layer
-        output_layer = Dense( units=40*40, activation='linear' )( flat )
-        
+       # dense (fully-connected) layer
+       output_layer = Dense( units=40*40, activation='linear' )( flat )
+       
     ########## Train CNN ###########
 
     myModel = Model( inputs=input_layer, outputs=output_layer )
@@ -316,77 +455,143 @@ def trainCNN_S( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False ) :
     # make file name
     fileName = 'cnn30km_'+str(region)+'_S'+axis+'_200e'
     if MOMENTUM_A : 
-        fileName = fileName + '_MOM_A'
+       fileName = fileName + '_MOM_A'
     elif MOMENTUM_B :    
-        fileName = fileName + '_MOM_B'
+       fileName = fileName + '_MOM_B'
 
     # save model
     myModel.save( fileName + '.h5' )
 
     # save training loss history
     with open('history_' + fileName, 'wb') as file_pi :
-        pickle.dump( History.history, file_pi )
-        
+       pickle.dump( History.history, file_pi )
+       
+def trainSparseCNN_S( l, axis, region, N ) :
+    
+    """
+    
+    This function loads data from a particular region of the QG model, 
+    and then trains a convolutional neural network (CNN) to predict
+    either the zonal (Sx) or meridional (Sy) component of the eddy momentum
+    forcing. The CNN is trained for 200 epochs, from which the model is
+    saved, including the validation loss during training as a function
+    of the number of epochs.
+    
+    Unique to this function is that the training data is sub-sampled to
+    N randomly chosen spatial locations and reconstructed with a simple 
+    cubic interpolation.
+    
+    """
+    
+    # load data 
+    xTrain, yTrain, xTest, yTest, scalings = makeSparseDataset( l, axis, region, N )
+
+    # number of training and validation samples
+    nTrain = xTrain.shape[0]
+    nTest = xTest.shape[0]
+
+    print "Number of training samples: ", nTrain
+    print "Number of validation samples: ", nTest
+
+    ########## Construct Layers ##########
+
+    input_layer = Input( shape=( 40, 40, 1 ) )
+
+    # Convolution layers
+    conv_1 = Convolution2D( 16, (8,8), strides=(2,2), padding='valid', activation='selu')( input_layer )
+    conv_2 = Convolution2D( 8, (4,4), padding='valid', activation='selu')( conv_1 )
+    conv_3 = Convolution2D( 8, (4,4), padding='valid', activation='selu')( conv_2 )
+
+    # Max Pooling
+    pool_1 = MaxPooling2D( pool_size=(2,2) )( conv_3 )
+    flat = Flatten()(pool_1)
+
+    # dense (fully-connected) layer
+    output_layer = Dense( units=40*40, activation='linear' )( flat )
+       
+    ########## Train CNN ###########
+
+    myModel = Model( inputs=input_layer, outputs=output_layer )
+    myOpt = Adam( lr=0.001 )
+    myModel.compile( loss='mean_squared_error', optimizer=myOpt )
+
+    # show the architecture and the parameters
+    print myModel.summary()
+
+    # train the model
+    History = myModel.fit( xTrain, yTrain, batch_size=16, epochs=200, verbose=2, validation_data=( xTest, yTest )  )
+
+    # make file name
+    fileName = 'cnn30km_'+str(region)+'_S'+axis+'_200e_'+str(N)+'ss'
+    
+    # save model
+    myModel.save( fileName + '.h5' )
+
+    # save training loss history
+    with open('history_' + fileName, 'wb') as file_pi :
+       pickle.dump( History.history, file_pi )
+
+       
 def trainCNN_SubSurface() :
 
-	""" 
-	
-	This function loads the upper- and middle-layer streamfunction
-	from region 1, and trains a convolutional neural network to
-	predict the middle-layer (output) using the upper-layer (input).
-	
-	The architecture of this neural network is identical to those
-	used to predict the eddy momentum forcing.
-	
-	"""
-	
-	xTrain, yTrain, xTest, yTest, scalings = loadAndNormDataMidPsi()
+    """ 
+    
+    This function loads the upper- and middle-layer streamfunction
+    from region 1, and trains a convolutional neural network to
+    predict the middle-layer (output) using the upper-layer (input).
+    
+    The architecture of this neural network is identical to those
+    used to predict the eddy momentum forcing.
+    
+    """
+    
+    xTrain, yTrain, xTest, yTest, scalings = loadAndNormDataMidPsi()
 
-	nTrain = xTrain.shape[0]
-	nTest = xTest.shape[0]
+    nTrain = xTrain.shape[0]
+    nTest = xTest.shape[0]
 
-	print nTrain, nTest
+    print nTrain, nTest
 
-	########## Construct Layers ##########
+    ########## Construct Layers ##########
 
-	input_layer = Input( shape=( 40, 40, 1 ) )
+    input_layer = Input( shape=( 40, 40, 1 ) )
 
-	# Convolution layers
-	conv_1 = Convolution2D( 16, (8,8), strides=(2,2), padding='valid', activation='selu')( input_layer )
-	conv_2 = Convolution2D( 8, (4,4), padding='valid', activation='selu')( conv_1 )
-	conv_3 = Convolution2D( 8, (4,4), padding='valid', activation='selu')( conv_2 )
+    # Convolution layers
+    conv_1 = Convolution2D( 16, (8,8), strides=(2,2), padding='valid', activation='selu')( input_layer )
+    conv_2 = Convolution2D( 8, (4,4), padding='valid', activation='selu')( conv_1 )
+    conv_3 = Convolution2D( 8, (4,4), padding='valid', activation='selu')( conv_2 )
 
-	# Max Pooling
-	pool_1 = MaxPooling2D( pool_size=(2,2) )( conv_3 )
-	flat = Flatten()(pool_1)
+    # Max Pooling
+    pool_1 = MaxPooling2D( pool_size=(2,2) )( conv_3 )
+    flat = Flatten()(pool_1)
 
-	# Dense (fully-connected) layer
-	output_layer = Dense( units=40*40, activation='linear' )( flat )
+    # Dense (fully-connected) layer
+    output_layer = Dense( units=40*40, activation='linear' )( flat )
 
-	########## Train CNN ###########
+    ########## Train CNN ###########
 
-	myModel = Model( inputs=input_layer, outputs=output_layer )
-	myOpt = Adam( lr=0.001 )
-	myModel.compile( loss='mean_squared_error', optimizer=myOpt )
+    myModel = Model( inputs=input_layer, outputs=output_layer )
+    myOpt = Adam( lr=0.001 )
+    myModel.compile( loss='mean_squared_error', optimizer=myOpt )
 
-	# uncomment if you want to load a model instead
-	#myModel = load_model('cnn30km_1_Sy_200e_MOM_b.h5')
+    # uncomment if you want to load a model instead
+    #myModel = load_model('cnn30km_1_Sy_200e_MOM_b.h5')
 
-	# show the architecture and the parameters
-	print myModel.summary()
+    # show the architecture and the parameters
+    print myModel.summary()
 
-	# train the model
-	History = myModel.fit( xTrain, yTrain, batch_size=16, epochs=100, verbose=2, validation_data=( xTest, yTest )  )
+    # train the model
+    History = myModel.fit( xTrain, yTrain, batch_size=16, epochs=100, verbose=2, validation_data=( xTest, yTest )  )
 
-	# save the model
-	myModel.save('cnn30km_1_midPsi_100e.h5')
+    # save the model
+    myModel.save('cnn30km_1_midPsi_100e.h5')
 
-	# save training history
-	with open('history_cnn30km_1_midPsi_100e', 'wb') as file_pi :
-		pickle.dump( History.history, file_pi )
-        
-        
-        
+    # save training history
+    with open('history_cnn30km_1_midPsi_100e', 'wb') as file_pi :
+       pickle.dump( History.history, file_pi )
+       
+       
+       
 ########################################################################
 #
 # Predicting Functions
@@ -414,9 +619,9 @@ def makeOverlapPreds( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False, MOMEN
     """
     modelName = 'cnn30km_'+str(region)+'_S'+axis+'_200e'
     if MOMENTUM_A :
-        modelName = modelName + '_MOM_A'
+       modelName = modelName + '_MOM_A'
     elif MOMENTUM_B :
-        modelName = modelName + '_MOM_B'
+       modelName = modelName + '_MOM_B'
 
     model = load_model('models/'+modelName+'.h5')
     
@@ -456,20 +661,20 @@ def makeOverlapPreds( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False, MOMEN
 
     for i in range( 0, 512-40+1, stride):   # loop through points in x
 
-        print i  # progress update
+       print i  # progress update
 
-        t0 = time.time()
+       t0 = time.time()
 
-        for j in range( 0, 512-40+1, stride ):   # loop through points in y
+       for j in range( 0, 512-40+1, stride ):   # loop through points in y
 
-            # make predictions at this point
-            SPred[:,j:j+40,i:i+40] += model.predict( np.reshape( psiFilt[:,j:j+40,i:i+40], (-1,40,40,1) ) ).reshape( (-1,40,40) )
+          # make predictions at this point
+          SPred[:,j:j+40,i:i+40] += model.predict( np.reshape( psiFilt[:,j:j+40,i:i+40], (-1,40,40,1) ) ).reshape( (-1,40,40) )
 
-            # update number of predictions made at each grid point
-            mask[j:j+40,i:i+40] += 1
+          # update number of predictions made at each grid point
+          mask[j:j+40,i:i+40] += 1
 
-        t1 = time.time()
-        print t1-t0
+       t1 = time.time()
+       print t1-t0
 
     # average the predictions
     SPred = np.divide( SPred, mask )
@@ -481,15 +686,15 @@ def makeOverlapPreds( l, axis, region, MOMENTUM_A=False, MOMENTUM_B=False, MOMEN
     # save as zipped numpy files
     fileName = 'S'+axis+'_Pred_R'+str(region)+'_str2'
     if MOMENTUM_A :
-        fileName = fileName + '_MOM_A'
-        SPred -= muS 
+       fileName = fileName + '_MOM_A'
+       SPred -= muS 
     elif MOMENTUM_B :
-        fileName = fileName + '_MOM_B'
-        SPred -= muS
+       fileName = fileName + '_MOM_B'
+       SPred -= muS
     
     
     np.savez(fileName+'.npz', SP=SPred )   # predictions
-    np.savez('SxSy_True_str2.npz', SxT=SxTrue, SyT=SyTrue )      # truth
+    np.savez('SxSy_True_str2.npz', SxT=SxTrue, SyT=SyTrue )     # truth
     
 def predictNewModels() :
     
@@ -530,63 +735,140 @@ def predictNewModels() :
     labels = [ '200', 'tau3', 'tau6', 'tau9' ]
     
     for string in labels :
+       
+       print "Currently making predictions for model: ", string
+       
+       data = sio.loadmat('data/Validation/psiPred_30km_'+string+'.mat')
+
+       # extract filtered streamfunction and anomaly
+       psiAnom = data['psiPredAnom']
+       psiFilt = data['psiPred_30km']
+
+       # move time dimension to the left
+       psiAnom = np.moveaxis(psiAnom, 2, 0)
+       psiFilt = np.moveaxis(psiFilt, 2, 0)
+
+       # calculate the TRUE eddy source term
+       SxTrue, SyTrue = calcEddyForcing(psiAnom, psiFilt, 30)
+
+       # standarize the input variables, i.e. the smoothed streamfunction,
+       # by removing the mean and dividing by the standard deviation
+       psiFilt = (psiFilt - muPsi) / sigmaPsi
+
+       # We now want to make the predictions for the entire region, at every
+       # time step. We move the neural network one grid point at a time over
+       # the entire region, making predictions as it moves along. The predictions
+       # at each grid point are then averaged.
+       SPred = np.zeros( (350,512,512) )
+
+       mask = np.zeros( (512,512) )
+
+       stride = 2
+
+       for i in range( 0, 512-40+1, stride):   # loop through points in x
+
+          if i % 100 == 0 : print i  # progress update
+
+          t0 = time.time()
+
+          for j in range( 0, 512-40+1, stride ):   # loop through points in y
+
+             # make predictions at this point
+             SPred[:,j:j+40,i:i+40] += model.predict( np.reshape( psiFilt[:,j:j+40,i:i+40], (-1,40,40,1) ) ).reshape( (-1,40,40) )
+
+             # update number of predictions made at each grid point
+             mask[j:j+40,i:i+40] += 1
+
+          t1 = time.time()
+          print t1-t0
+
+       # average the predictions
+       SPred = np.divide( SPred, mask )
+
+       # rescale psi, either Sx or Sy
+       psiFilt = psiFilt * sigmaPsi + muPsi
+       SPred = SPred * sigmaS + muS
+
+       # save as zipped numpy files
+       np.savez('Sx_Pred_R1_str2_'+string+'.npz', SP=SPred, ST=SxTrue )   # predictions
+
+def makeSparsePreds() :
+    
+    """
+    
+    Make predictions using the neural networks
+    trained on sparsely sub-sampled data.
+    
+    """
+    l = 30
+    axis = 'x'
+    region = 1
+    
+    #for N in [ 1500, 1350, 1200, 1050, 900, 750, 600, 450, 300, 150, 75, 30 ] :
+    for N in [ 1200, 1050, 900, 750, 600, 450, 300, 150, 75, 30 ] :
 		
-		print "Currently making predictions for model: ", string
-		
-		data = sio.loadmat('data/Validation/psiPred_30km_'+string+'.mat')
+        # load data and get scalings
+        xTrain, yTrain, xTest, yTest, scalings = makeSparseDataset( l, axis, region, N )
+        muPsi, sigmaPsi, muS, sigmaS = scalings[0], scalings[1], scalings[2], scalings[3]
+        
+        # load model
+        model = load_model('cnn30km_1_Sx_200e_'+str(N)+'ss.h5')
+    
+        # load filtered-streamfunction from full region (final year) to 
+        # use as the input variable to make preditions with
+        data = sio.loadmat('data/Validation/psiPred_30km.mat')
 
-		# extract filtered streamfunction and anomaly
-		psiAnom = data['psiPredAnom']
-		psiFilt = data['psiPred_30km']
+        # extract filtered streamfunction and anomaly
+        psiAnom = data['psiPredAnom']
+        psiFilt = data['psiPred_30km']
 
-		# move time dimension to the left
-		psiAnom = np.moveaxis(psiAnom, 2, 0)
-		psiFilt = np.moveaxis(psiFilt, 2, 0)
+        # move time dimension to the left
+        psiAnom = np.moveaxis(psiAnom, 2, 0)
+        psiFilt = np.moveaxis(psiFilt, 2, 0)
 
-		# calculate the TRUE eddy source term
-		SxTrue, SyTrue = calcEddyForcing(psiAnom, psiFilt, 30)
+        # calculate the TRUE eddy source term
+        SxTrue, SyTrue = calcEddyForcing(psiAnom, psiFilt, l)
 
-		# standarize the input variables, i.e. the smoothed streamfunction,
-		# by removing the mean and dividing by the standard deviation
-		psiFilt = (psiFilt - muPsi) / sigmaPsi
+        # standarize the input variables, i.e. the smoothed streamfunction,
+        # by removing the mean and dividing by the standard deviation
+        psiFilt = (psiFilt - muPsi) / sigmaPsi
 
-		# We now want to make the predictions for the entire region, at every
-		# time step. We move the neural network one grid point at a time over
-		# the entire region, making predictions as it moves along. The predictions
-		# at each grid point are then averaged.
-		SPred = np.zeros( (350,512,512) )
+        # We now want to make the predictions for the entire region, at every
+        # time step. We move the neural network one grid point at a time over
+        # the entire region, making predictions as it moves along. The predictions
+        # at each grid point are then averaged.
+        SPred = np.zeros( (350,512,512) )
 
-		mask = np.zeros( (512,512) )
+        mask = np.zeros( (512,512) )
 
-		stride = 2
+        stride = 2
 
-		for i in range( 0, 512-40+1, stride):   # loop through points in x
+        for i in range( 0, 512-40+1, stride):   # loop through points in x
 
-			if i % 100 == 0 : print i  # progress update
+            print i  # progress update
 
-			t0 = time.time()
+            t0 = time.time()
 
-			for j in range( 0, 512-40+1, stride ):   # loop through points in y
+            for j in range( 0, 512-40+1, stride ):   # loop through points in y
 
-				# make predictions at this point
-				SPred[:,j:j+40,i:i+40] += model.predict( np.reshape( psiFilt[:,j:j+40,i:i+40], (-1,40,40,1) ) ).reshape( (-1,40,40) )
+                # make predictions at this point
+                SPred[:,j:j+40,i:i+40] += model.predict( np.reshape( psiFilt[:,j:j+40,i:i+40], (-1,40,40,1) ) ).reshape( (-1,40,40) )
 
-				# update number of predictions made at each grid point
-				mask[j:j+40,i:i+40] += 1
+                # update number of predictions made at each grid point
+                mask[j:j+40,i:i+40] += 1
 
-			t1 = time.time()
-			print t1-t0
+            t1 = time.time()
+            print t1-t0
 
-		# average the predictions
-		SPred = np.divide( SPred, mask )
+        # average the predictions
+        SPred = np.divide( SPred, mask )
 
-		# rescale psi, either Sx or Sy
-		psiFilt = psiFilt * sigmaPsi + muPsi
-		SPred = SPred * sigmaS + muS
+        # rescale psi, either Sx or Sy
+        psiFilt = psiFilt * sigmaPsi + muPsi
+        SPred = SPred * sigmaS + muS
 
-		# save as zipped numpy files
-		np.savez('Sx_Pred_R1_str2_'+string+'.npz', SP=SPred, ST=SxTrue )   # predictions
-
+        # save as zipped numpy files
+        np.savez('Sx_Pred_R1_str2_'+str(N)+'ss.npz', SP=SPred, ST=SxTrue )   # predictions
 
 ########################################################################
 #
@@ -621,20 +903,20 @@ def getActivations( X, model ) :
     return act1, act2, act3
     
 def plotSyntheticActivationMaps() :
-	
+    
     """
-	
+    
     This function examines the activation maps at each
     stage of a trained convolutional neural network, by
     generating a 'fake' streamfunction as the input.
-	
+    
     A radially symmetric Gaussian is used as the fake input
     to represent an eddy. The resulting activations maps from
     each convolution layer are then plotted.
-	
+    
     The specific neural network loaded is the CNN trained on
     region 1 to predict Sx.
-	
+    
     """
 
     # load model
@@ -666,15 +948,15 @@ def plotSyntheticActivationMaps() :
     col3Axes = []; col4Axes = []
 
     for row in range(8) :
-    	# create axes
-    	ax1 = plt.subplot2grid( (8,16), (row,5) )  # 1st layer
-    	ax2 = plt.subplot2grid( (8,16), (row,6) )  # 1st layer
-    	ax3 = plt.subplot2grid( (8,16), (row,8) )  # 2nd layer
-    	ax4 = plt.subplot2grid( (8,16), (row,10) )  # 3rd layer
+       # create axes
+       ax1 = plt.subplot2grid( (8,16), (row,5) )  # 1st layer
+       ax2 = plt.subplot2grid( (8,16), (row,6) )  # 1st layer
+       ax3 = plt.subplot2grid( (8,16), (row,8) )  # 2nd layer
+       ax4 = plt.subplot2grid( (8,16), (row,10) )  # 3rd layer
 
-    	# add to lists
-    	col1Axes.append( ax1 ); col2Axes.append( ax2 )
-     	col3Axes.append( ax3 ); col4Axes.append( ax4 )
+       # add to lists
+       col1Axes.append( ax1 ); col2Axes.append( ax2 )
+       col3Axes.append( ax3 ); col4Axes.append( ax4 )
 
 
     # create subplot for Sx prediction
@@ -695,9 +977,9 @@ def plotSyntheticActivationMaps() :
     # plot activation functions of all three layers
     for row in range(8) :
 
-    	# turn of the axes of each subplot
-    	col1Axes[row].axis('off'); col2Axes[row].axis('off')
-    	col3Axes[row].axis('off'); col4Axes[row].axis('off')
+        # turn of the axes of each subplot
+        col1Axes[row].axis('off'); col2Axes[row].axis('off')
+        col3Axes[row].axis('off'); col4Axes[row].axis('off')
 
         # Activation Layer I
         col1Axes[row].imshow( act1[:,:,row], cmap='seismic', origin='lower' )
@@ -745,3 +1027,24 @@ def plotSyntheticActivationMaps() :
     plt.savefig('activationMaps.png', format='png', dpi=300 )
 
     plt.show()
+    
+    
+def generateUniqueCoords( N ) :
+    
+    # generate N random numbers between 0 and 1599
+    subSamples = random.sample( range(1600), N )
+    
+    # generate list of all coordinates, and then only store
+    # N pairs of these coordinates, according to above random 
+    # sampling
+    coords = []
+    for x in range(40) :
+       for y in range(40) :
+          
+          n = x*40 + y   # value between 0 and 1599
+          
+          # only save sub-samples
+          if n in subSamples : coords.append( (x,y) )
+             
+    return coords
+          

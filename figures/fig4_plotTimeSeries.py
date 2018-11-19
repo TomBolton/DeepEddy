@@ -37,6 +37,22 @@ SxPred1, SyPred1 = predsX1['SP'], predsY1['SP']
 SxPred2, SyPred2 = predsX2['SP'], predsY2['SP']
 SxPred3, SyPred3 = predsX3['SP'], predsY3['SP']
 
+muX1 = np.mean( np.mean( SxPred1, axis=(1,2) ) )
+muX2 = np.mean( np.mean( SxPred2, axis=(1,2) ) )
+muX3 = np.mean( np.mean( SxPred3, axis=(1,2) ) )
+
+muY1 = np.mean( np.mean( SyPred1, axis=(1,2) ) )
+muY2 = np.mean( np.mean( SyPred2, axis=(1,2) ) )
+muY3 = np.mean( np.mean( SyPred3, axis=(1,2) ) )
+
+print "Mean zonal bias of region 1: ", muX1
+print "Mean zonal bias of region 2: ", muX2
+print "Mean zonal bias of region 3: ", muX3
+print " "
+print "Mean meridional bias of region 1: ", muY1
+print "Mean meridional bias of region 2: ", muY2
+print "Mean meridional bias of region 3: ", muY3
+
 # choose a point in space to plot (in km from origin)
 x0, y0 = 1920, 2400
 
@@ -137,7 +153,7 @@ ax3.set_position( [ pos3.x0, pos3.y0-0.02, pos3.width, pos3.height ] )
 ax2.plot( [0.045,0.96], [ 0.53, 0.53 ], color='black', clip_on=False, transform=fig.transFigure, solid_capstyle='round' )
 
 
-plt.savefig('timeSeries.png', format='png', dpi=300 )
+#plt.savefig('timeSeries.png', format='png', dpi=300 )
 
 
-plt.show()
+#plt.show()

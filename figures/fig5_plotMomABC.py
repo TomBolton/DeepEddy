@@ -36,13 +36,13 @@ SxPredC = SxPredC - np.mean( SxPredC, axis=(1,2), keepdims=True )
 SyPredC = SyPredC - np.mean( SyPredC, axis=(1,2), keepdims=True )
 
 
-print "Mean zonal bias of approach A: ", np.mean( np.mean( SxPredA, axis=(1,2) ) )*1e5
-print "Mean zonal bias of approach B: ", np.mean( np.mean( SxPredB, axis=(1,2) ) )*1e5
-print "Mean zonal bias of approach C: ", np.mean( np.mean( SxPredC, axis=(1,2) ) )*1e5
+print "Mean zonal bias of approach A: ", np.mean( np.mean( SxPredA, axis=(1,2) ) )*1e6
+print "Mean zonal bias of approach B: ", np.mean( np.mean( SxPredB, axis=(1,2) ) )*1e6
+print "Mean zonal bias of approach C: ", np.mean( np.mean( SxPredC, axis=(1,2) ) )*1e6
 
-print "Mean meridional bias of approach A: ", np.mean( np.mean( SyPredA, axis=(1,2) ) )*1e5
-print "Mean meridional bias of approach B: ", np.mean( np.mean( SyPredB, axis=(1,2) ) )*1e5
-print "Mean meridional bias of approach C: ", np.mean( np.mean( SyPredC, axis=(1,2) ) )*1e5
+print "Mean meridional bias of approach A: ", np.mean( np.mean( SyPredA, axis=(1,2) ) )*1e6
+print "Mean meridional bias of approach B: ", np.mean( np.mean( SyPredB, axis=(1,2) ) )*1e6
+print "Mean meridional bias of approach C: ", np.mean( np.mean( SyPredC, axis=(1,2) ) )*1e6
 
 ##### Plotting #####
 
